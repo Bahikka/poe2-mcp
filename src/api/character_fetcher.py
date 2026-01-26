@@ -602,7 +602,6 @@ class CharacterFetcher:
         # Check if this is poe.ninja format with charModel
         char_model = raw_data.get('charModel', raw_data)
 
-        # Passive tree data - poe.ninja uses 'passiveSelection' (list of node IDs)
         passive_data = (
             char_model.get('passiveSelection') or  # poe.ninja format: list of node IDs
             char_model.get('passives') or          # Alternative format
@@ -610,6 +609,7 @@ class CharacterFetcher:
             char_model.get('hashes') or            # Official API format
             []
         )
+        passive_nodes = self._normalize_passive_nodes(passive_data)
 
         return {
             'name': char_model.get('name', character_name),
@@ -620,15 +620,43 @@ class CharacterFetcher:
             'experience': char_model.get('experience', 0),
             'items': char_model.get('items', char_model.get('equipment', [])),
             'skills': char_model.get('skills', []),
-            'passive_tree': passive_data,
+            'passive_tree': passive_nodes,
             'keystones': char_model.get('keystones', []),
             'jewels': char_model.get('jewels', []),
             'flasks': char_model.get('flasks', []),
             'charms': char_model.get('charms', []),
             'stats': char_model.get('defensiveStats', {}),
+            'ascendancy': char_model.get('ascendancy'),
             'pob_export': char_model.get('pathOfBuildingExport', ''),
             'raw_data': raw_data  # Keep original data for reference
         }
+
+    @staticmethod
+    def _normalize_passive_nodes(passive_data: Any) -> List[int]:
+        """
+        Normalize passive node data to a list of integer node IDs.
+
+        Supports poe.ninja formats that may return lists or dictionaries.
+        """
+        if isinstance(passive_data, dict):
+            passive_data = (
+                passive_data.get("hashes")
+                or passive_data.get("nodes")
+                or passive_data.get("passiveTree")
+                or []
+            )
+
+        if not isinstance(passive_data, list):
+            return []
+
+        nodes: List[int] = []
+        for node in passive_data:
+            try:
+                nodes.append(int(node))
+            except (TypeError, ValueError):
+                continue
+
+        return nodes
 
     async def close(self):
         """Close the HTTP client and ninja API client"""

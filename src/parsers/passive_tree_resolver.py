@@ -32,6 +32,7 @@ class ResolvedNode:
     is_notable: bool = False
     is_keystone: bool = False
     is_jewel_socket: bool = False
+    is_ascendancy: bool = False
     x: float = 0.0
     y: float = 0.0
     connections: List[int] = field(default_factory=list)
@@ -111,13 +112,14 @@ class PassiveTreeResolver:
     #   STR bottom-left                      DEX bottom-right
     #               \                        /
     #                MERCENARY (50986) - STR/DEX bottom
+    # NOTE: Node IDs are aligned with PSG_STARTING_NODES in characters_spec.py.
     CLASS_STARTS = {
         47175: "WARRIOR",      # MARAUDER position - Pure STR (bottom-left)
         50459: "RANGER",       # RANGER position - Pure DEX (bottom-right) - shared by Ranger & Huntress
         54447: "SORCERESS",    # WITCH position - Pure INT (top) - shared by Sorceress & Witch
-        50986: "MERCENARY",    # DUELIST position - STR/DEX hybrid (bottom-center)
+        50986: "MONK",         # SHADOW position - DEX/INT hybrid (top-right)
         61525: "DRUID",        # TEMPLAR position - STR/INT hybrid (top-left)
-        44683: "MONK",         # SHADOW position - DEX/INT hybrid (top-right)
+        44683: "MERCENARY",    # DUELIST position - STR/DEX hybrid (bottom-center)
     }
 
     # Reverse mapping: class name to starting node ID
@@ -128,9 +130,9 @@ class PassiveTreeResolver:
         "HUNTRESS": 50459,     # Huntress (DEX) shares Ranger's starting position
         "SORCERESS": 54447,
         "WITCH": 54447,        # Witch (INT) shares Sorceress's starting position
-        "MERCENARY": 50986,
+        "MERCENARY": 44683,
         "DRUID": 61525,
-        "MONK": 44683,
+        "MONK": 50986,
     }
 
     # PoE2 Ascendancies mapped to base class
@@ -436,6 +438,7 @@ class PassiveTreeResolver:
             is_notable=node_data.get('is_notable', False),
             is_keystone=node_data.get('is_keystone', False),
             is_jewel_socket='Jewel Socket' in node_data.get('name', ''),
+            is_ascendancy=node_data.get('is_ascendancy', False),
             x=node_data.get('x', 0.0),
             y=node_data.get('y', 0.0),
             connections=node_data.get('connections', []),
@@ -548,13 +551,21 @@ class PassiveTreeResolver:
 
         return sorted(found, key=lambda x: x[1])
 
-    def analyze_build(self, node_ids: List[int], find_recommendations: bool = True) -> BuildAnalysis:
+    def analyze_build(
+        self,
+        node_ids: List[int],
+        find_recommendations: bool = True,
+        class_name: Optional[str] = None,
+        ascendancy: Optional[str] = None
+    ) -> BuildAnalysis:
         """
         Analyze a character's allocated passive nodes.
 
         Args:
             node_ids: List of allocated node IDs from poe.ninja
             find_recommendations: Whether to find nearest unallocated notables
+            class_name: Base class name if known (e.g., "Ranger")
+            ascendancy: Ascendancy name if known (e.g., "Deadeye")
 
         Returns:
             BuildAnalysis with categorized nodes and recommendations
@@ -597,12 +608,7 @@ class PassiveTreeResolver:
             )
 
         # Determine likely class start
-        class_start = None
-        for class_id, class_name in self.CLASS_STARTS.items():
-            path = self.find_path(class_id, node_ids[0] if node_ids else 0)
-            if path and all(nid in node_set or nid == class_id for nid in path.path[:3]):
-                class_start = class_name
-                break
+        class_start = self._resolve_class_start(class_name, ascendancy, node_set)
 
         # Estimate tree region based on node coordinates
         all_resolved = keystones + notables + small_nodes + jewel_sockets
@@ -631,6 +637,73 @@ class PassiveTreeResolver:
             tree_region=tree_region,
             connectivity_note=connectivity_note
         )
+
+    def _resolve_class_start(
+        self,
+        class_name: Optional[str],
+        ascendancy: Optional[str],
+        node_set: Set[int]
+    ) -> Optional[str]:
+        """
+        Resolve the most likely class start for a build.
+
+        Uses explicit class/ascendancy if provided; otherwise infers based on
+        the shortest distance from class start nodes to allocated nodes.
+        """
+        normalized_class = self._normalize_class_name(class_name)
+
+        if ascendancy:
+            asc_class = self.get_class_for_ascendancy(ascendancy)
+            if asc_class:
+                normalized_class = asc_class
+
+        if normalized_class and normalized_class in self.CLASS_TO_START_NODE:
+            return normalized_class
+
+        if not node_set:
+            return None
+
+        best_class = None
+        best_distance = float('inf')
+        for start_node_id, start_class in self.CLASS_STARTS.items():
+            distance = self._distance_to_any_allocated(start_node_id, node_set)
+            if distance is None:
+                continue
+            if distance < best_distance:
+                best_distance = distance
+                best_class = start_class
+
+        return best_class
+
+    def _distance_to_any_allocated(self, start_node: int, node_set: Set[int]) -> Optional[int]:
+        """Return shortest distance from a class start node to any allocated node."""
+        if start_node not in self._adjacency:
+            return None
+
+        if start_node in node_set:
+            return 0
+
+        visited = {start_node}
+        queue = deque([(start_node, 0)])
+
+        while queue:
+            current, dist = queue.popleft()
+            for neighbor in self._adjacency.get(current, []):
+                if neighbor in visited:
+                    continue
+                if neighbor in node_set:
+                    return dist + 1
+                visited.add(neighbor)
+                queue.append((neighbor, dist + 1))
+
+        return None
+
+    @staticmethod
+    def _normalize_class_name(class_name: Optional[str]) -> Optional[str]:
+        """Normalize class names to the internal uppercase format."""
+        if not class_name:
+            return None
+        return class_name.strip().upper()
 
     def _check_connectivity(self, node_ids: List[int]) -> bool:
         """
@@ -695,13 +768,15 @@ class PassiveTreeResolver:
         Returns:
             Region name or None if cannot be determined
         """
-        if not nodes:
+        filtered_nodes = [node for node in nodes if not node.is_ascendancy]
+
+        if not filtered_nodes:
             return None
 
         # Calculate centroid of allocated nodes
-        total_x = sum(n.x for n in nodes if n.x != 0)
-        total_y = sum(n.y for n in nodes if n.y != 0)
-        count = sum(1 for n in nodes if n.x != 0 or n.y != 0)
+        total_x = sum(n.x for n in filtered_nodes if n.x != 0)
+        total_y = sum(n.y for n in filtered_nodes if n.y != 0)
+        count = sum(1 for n in filtered_nodes if n.x != 0 or n.y != 0)
 
         if count == 0:
             return None
