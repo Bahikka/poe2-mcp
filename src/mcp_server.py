@@ -770,6 +770,14 @@ class PoE2BuildOptimizerMCP:
                                 "type": "boolean",
                                 "description": "Whether to find nearest unallocated notables",
                                 "default": True
+                            },
+                            "class_name": {
+                                "type": "string",
+                                "description": "Optional: Base class name (e.g., Ranger, Warrior) to improve start detection"
+                            },
+                            "ascendancy": {
+                                "type": "string",
+                                "description": "Optional: Ascendancy name (e.g., Deadeye, Witchhunter) to improve start detection"
                             }
                         },
                         "required": ["node_ids"]
@@ -1325,9 +1333,13 @@ If the character is on the ladder, try `compare_to_top_players` instead.
             passive_analysis = None
             if self.passive_tree_resolver:
                 try:
-                    passive_ids = character_data.get('passive_tree', [])
+                    passive_ids = self._normalize_passive_ids(character_data.get('passive_tree', []))
                     if passive_ids:
-                        passive_analysis = self.passive_tree_resolver.analyze_build(passive_ids)
+                        passive_analysis = self.passive_tree_resolver.analyze_build(
+                            passive_ids,
+                            class_name=character_data.get("class"),
+                            ascendancy=character_data.get("ascendancy")
+                        )
                         logger.info(f"[ANALYZE_CHAR] Resolved {passive_analysis.total_nodes} passive nodes")
                 except Exception as e:
                     logger.warning(f"[ANALYZE_CHAR] Passive tree resolution failed: {e}")
@@ -3849,7 +3861,7 @@ Consider:
                     text="Error: Passive tree resolver not initialized. PSG database may be missing."
                 )]
 
-            node_ids = args.get("node_ids", [])
+            node_ids = self._normalize_passive_ids(args.get("node_ids", []))
             target_notable = args.get("target_notable")
             find_recommendations = args.get("find_recommendations", True)
 
@@ -3862,7 +3874,9 @@ Consider:
             # Analyze the build
             analysis = self.passive_tree_resolver.analyze_build(
                 node_ids,
-                find_recommendations=find_recommendations
+                find_recommendations=find_recommendations,
+                class_name=args.get("class_name"),
+                ascendancy=args.get("ascendancy")
             )
 
             # Build response
@@ -4931,6 +4945,29 @@ Could not extract account and character from URL.
     # ============================================================================
     # FORMATTING METHODS
     # ============================================================================
+
+    @staticmethod
+    def _normalize_passive_ids(passive_data) -> list:
+        """Normalize passive IDs into a list of integers."""
+        if isinstance(passive_data, dict):
+            passive_data = (
+                passive_data.get("hashes")
+                or passive_data.get("nodes")
+                or passive_data.get("passiveTree")
+                or []
+            )
+
+        if not isinstance(passive_data, list):
+            return []
+
+        normalized = []
+        for node_id in passive_data:
+            try:
+                normalized.append(int(node_id))
+            except (TypeError, ValueError):
+                continue
+
+        return normalized
 
     def _format_gear_stats(self, gear: dict) -> str:
         """Format gear stats for display"""
