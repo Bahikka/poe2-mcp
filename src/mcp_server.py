@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import sys
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -360,6 +361,16 @@ class PoE2BuildOptimizerMCP:
                 return await self._handle_analyze_passive_tree(arguments)
             elif name == "import_poe_ninja_url":
                 return await self._handle_import_poe_ninja_url(arguments)
+            elif name == "import_poe_ninja_url_verbose":
+                return await self._handle_import_poe_ninja_url_verbose(arguments)
+            elif name == "debug_fetch_character_raw":
+                return await self._handle_debug_fetch_character_raw(arguments)
+            elif name == "debug_summarize_items":
+                return await self._handle_debug_summarize_items(arguments)
+            elif name == "list_overviews":
+                return await self._handle_list_overviews(arguments)
+            elif name == "set_default_overview":
+                return await self._handle_set_default_overview(arguments)
             # PASSIVE TREE DATA TOOLS (4 new tools)
             elif name == "list_all_keystones":
                 return await self._handle_list_all_keystones(arguments)
@@ -406,7 +417,7 @@ class PoE2BuildOptimizerMCP:
 
         @self.server.list_tools()
         async def handle_list_tools() -> List[types.Tool]:
-            """List all available tools - 18 focused MCP tools
+            """List all available tools - 37 focused MCP tools
 
             MCP Philosophy: MCP = Data Access Layer, Claude = Intelligence Layer
             These tools provide data Claude cannot access natively. Claude handles
@@ -797,6 +808,74 @@ class PoE2BuildOptimizerMCP:
                             }
                         },
                         "required": ["url"]
+                    }
+                ),
+                types.Tool(
+                    name="import_poe_ninja_url_verbose",
+                    description="Import a poe.ninja profile URL and return verbose diagnostics for the JSON API request.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "poe.ninja profile URL (e.g., https://poe.ninja/poe2/profile/AccountName/character/CharacterName)"
+                            },
+                            "league": {
+                                "type": "string",
+                                "description": "Optional league name override (e.g., 'Standard')"
+                            },
+                            "overview": {
+                                "type": "string",
+                                "description": "Optional overview slug override"
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                ),
+                types.Tool(
+                    name="debug_fetch_character_raw",
+                    description="Fetch raw poe.ninja JSON for a character and save it to ./debug_dumps for offline fixtures.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "account": {"type": "string", "description": "Account name"},
+                            "character": {"type": "string", "description": "Character name"},
+                            "league": {"type": "string", "description": "Optional league name override"},
+                            "overview": {"type": "string", "description": "Optional overview slug override"}
+                        },
+                        "required": ["account", "character"]
+                    }
+                ),
+                types.Tool(
+                    name="debug_summarize_items",
+                    description="Summarize item schema from a saved poe.ninja JSON dump.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "raw_json_path": {
+                                "type": "string",
+                                "description": "Path to a saved JSON dump (e.g., ./debug_dumps/account_character.json)"
+                            }
+                        },
+                        "required": ["raw_json_path"]
+                    }
+                ),
+                types.Tool(
+                    name="list_overviews",
+                    description="List known poe.ninja overview slugs from index-state.",
+                    inputSchema={"type": "object", "properties": {}}
+                ),
+                types.Tool(
+                    name="set_default_overview",
+                    description="Set a default overview slug to try before league snapshots.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "overview": {
+                                "type": ["string", "null"],
+                                "description": "Overview slug to set (or null to clear)"
+                            }
+                        }
                     }
                 ),
 
@@ -3997,8 +4076,8 @@ Consider:
         for pattern in patterns:
             match = re.search(pattern, url)
             if match:
-                account = match.group(1)
-                character = match.group(2)
+                account = unquote(match.group(1))
+                character = unquote(match.group(2))
                 break
 
         if not account or not character:
@@ -4025,6 +4104,165 @@ Could not extract account and character from URL.
             "character": character,
             "league": "Abyss"
         })
+
+    async def _handle_import_poe_ninja_url_verbose(self, args: dict) -> List[types.TextContent]:
+        """Import a poe.ninja URL with verbose diagnostics."""
+        import re
+        import traceback
+
+        url = args.get("url", "")
+        league = args.get("league") or "Abyss"
+        overview = args.get("overview")
+
+        patterns = [
+            r'poe\.ninja/poe2/profile/([^/]+)/character/([^/?\s]+)',
+            r'poe\.ninja/poe2/builds/character/([^/]+)/([^/?\s]+)',
+            r'poe\.ninja/builds/character/([^/]+)/([^/?\s]+)',
+        ]
+
+        account = None
+        character = None
+
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                account = unquote(match.group(1))
+                character = unquote(match.group(2))
+                break
+
+        if not account or not character:
+            return [types.TextContent(
+                type="text",
+                text=f"""# URL Parse Error
+
+Could not extract account and character from URL.
+
+**URL provided:** `{url}`
+"""
+            )]
+
+        try:
+            result = await self.char_fetcher.ninja_api.fetch_character_verbose(
+                account=account,
+                character=character,
+                league=league,
+                overview=overview,
+                allow_html_fallback=False,
+            )
+            result.pop("data", None)
+        except Exception:
+            result = {
+                "resolved_account": account,
+                "resolved_character": character,
+                "league": league,
+                "overview": overview,
+                "exception": traceback.format_exc(),
+                "fallback_used": False,
+                "source": "poe_ninja_json",
+            }
+
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+    async def _handle_debug_fetch_character_raw(self, args: dict) -> List[types.TextContent]:
+        """Fetch raw poe.ninja JSON and save to debug_dumps."""
+        account = args.get("account")
+        character = args.get("character")
+        league = args.get("league") or "Abyss"
+        overview = args.get("overview")
+
+        if not account or not character:
+            return [types.TextContent(type="text", text="Error: account and character are required.")]
+
+        result = await self.char_fetcher.ninja_api.fetch_character_verbose(
+            account=account,
+            character=character,
+            league=league,
+            overview=overview,
+            allow_html_fallback=False,
+        )
+
+        raw_data = result.get("data")
+        if not raw_data:
+            result.pop("data", None)
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        safe_account = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in account)
+        safe_character = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in character)
+        dump_dir = Path("debug_dumps")
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        dump_path = dump_dir / f"{safe_account}_{safe_character}.json"
+
+        dump_path.write_text(json.dumps(raw_data, indent=2, ensure_ascii=False))
+
+        summary = {
+            "path": str(dump_path),
+            "raw_top_keys": list(raw_data.keys()) if isinstance(raw_data, dict) else [],
+            "items_len": result.get("items_len"),
+            "source": result.get("source"),
+        }
+        return [types.TextContent(type="text", text=json.dumps(summary, indent=2, ensure_ascii=False))]
+
+    async def _handle_debug_summarize_items(self, args: dict) -> List[types.TextContent]:
+        """Summarize item schema from a raw JSON dump."""
+        raw_json_path = args.get("raw_json_path")
+        if not raw_json_path:
+            return [types.TextContent(type="text", text="Error: raw_json_path is required.")]
+
+        path = Path(raw_json_path)
+        if not path.exists():
+            return [types.TextContent(type="text", text=f"Error: file not found: {raw_json_path}")]
+
+        raw_data = json.loads(path.read_text())
+        item_keys = ["items", "equipment", "gear"]
+        present_keys = [key for key in item_keys if key in raw_data]
+        items_container = None
+        for key in item_keys:
+            if raw_data.get(key):
+                items_container = raw_data.get(key)
+                break
+
+        if isinstance(items_container, dict):
+            items_list = list(items_container.values())
+        elif isinstance(items_container, list):
+            items_list = items_container
+        else:
+            items_list = []
+
+        item_summaries = []
+        for item in items_list[:3]:
+            if not isinstance(item, dict):
+                item_summaries.append({"type": type(item).__name__})
+                continue
+            item_data = item.get("itemData") if isinstance(item.get("itemData"), dict) else None
+            item_summaries.append({
+                "keys": sorted(item.keys()),
+                "slot_fields": {
+                    "itemSlot": item.get("itemSlot"),
+                    "slot": item.get("slot"),
+                    "inventoryId": item.get("inventoryId"),
+                },
+                "wrapped_itemData": bool(item_data),
+                "itemData_keys": sorted(item_data.keys()) if item_data else [],
+            })
+
+        summary = {
+            "item_keys_present": present_keys,
+            "items_type": type(items_container).__name__ if items_container is not None else "none",
+            "items_len": len(items_list),
+            "sample_items": item_summaries,
+        }
+        return [types.TextContent(type="text", text=json.dumps(summary, indent=2, ensure_ascii=False))]
+
+    async def _handle_list_overviews(self, args: dict) -> List[types.TextContent]:
+        """List available overview slugs from poe.ninja index-state."""
+        overviews = await self.char_fetcher.ninja_api.list_overviews()
+        return [types.TextContent(type="text", text=json.dumps(overviews, indent=2, ensure_ascii=False))]
+
+    async def _handle_set_default_overview(self, args: dict) -> List[types.TextContent]:
+        """Set a default overview slug for poe.ninja JSON calls."""
+        overview = args.get("overview")
+        self.char_fetcher.ninja_api.set_default_overview(overview)
+        return [types.TextContent(type="text", text=f"Default overview set to: {overview or 'None'}")]
 
     # ============================================================================
     # PASSIVE TREE DATA HANDLERS (4 new handlers)

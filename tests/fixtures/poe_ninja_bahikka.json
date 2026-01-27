@@ -1,0 +1,35 @@
+{
+  "name": "Bahikka",
+  "account": "🅱🄰🅷🅸🅺🅺🄰-1456",
+  "league": "Abyss",
+  "equipment": {
+    "0": {
+      "inventoryId": "Helm",
+      "itemData": {
+        "name": "Mock Hood",
+        "typeLine": "Silken Hood",
+        "baseType": "Hood",
+        "ilvl": 70,
+        "frameType": 2,
+        "implicitMods": [],
+        "explicitMods": [
+          "+50 to maximum Life"
+        ]
+      }
+    },
+    "1": {
+      "inventoryId": "BodyArmour",
+      "itemData": {
+        "name": "Mock Coat",
+        "typeLine": "Scale Coat",
+        "baseType": "Coat",
+        "ilvl": 70,
+        "frameType": 2,
+        "implicitMods": [],
+        "explicitMods": [
+          "+90 to Armour"
+        ]
+      }
+    }
+  }
+}
