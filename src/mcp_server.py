@@ -5086,31 +5086,34 @@ Could not extract account and character from URL.
         by_slot = {}
         for item in items:
             slot = item.get('slot', 'Unknown')
+            if not isinstance(slot, str):
+                slot = str(slot)
+            slot_lower = slot.lower()
             # Normalize slot names
-            if 'weapon' in slot.lower():
+            if 'weapon' in slot_lower:
                 slot = 'Weapon'
-            elif 'offhand' in slot.lower() or 'shield' in slot.lower():
+            elif 'offhand' in slot_lower or 'shield' in slot_lower:
                 slot = 'Offhand'
-            elif 'helm' in slot.lower():
+            elif 'helm' in slot_lower:
                 slot = 'Helm'
-            elif 'body' in slot.lower() or 'armour' in slot.lower():
+            elif 'body' in slot_lower or 'armour' in slot_lower:
                 slot = 'BodyArmour'
-            elif 'glove' in slot.lower():
+            elif 'glove' in slot_lower:
                 slot = 'Gloves'
-            elif 'boot' in slot.lower():
+            elif 'boot' in slot_lower:
                 slot = 'Boots'
-            elif 'belt' in slot.lower():
+            elif 'belt' in slot_lower:
                 slot = 'Belt'
-            elif 'amulet' in slot.lower():
+            elif 'amulet' in slot_lower:
                 slot = 'Amulet'
-            elif 'ring' in slot.lower():
+            elif 'ring' in slot_lower:
                 if 'Ring' in by_slot:
                     slot = 'Ring2'
                 else:
                     slot = 'Ring'
-            elif 'flask' in slot.lower():
+            elif 'flask' in slot_lower:
                 slot = 'Flask'
-            elif 'charm' in slot.lower():
+            elif 'charm' in slot_lower:
                 slot = 'Charm'
 
             by_slot.setdefault(slot, []).append(item)

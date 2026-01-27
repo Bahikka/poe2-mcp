@@ -125,7 +125,11 @@ class PassiveOptimizer:
             notables = self.get_all_notables()
 
         # Extract character class and current build focus
-        char_class = character_data.get("class", "").lower()
+        raw_class = character_data.get("class", "")
+        if isinstance(raw_class, str):
+            char_class = raw_class.lower()
+        else:
+            char_class = str(raw_class).lower()
 
         # Recommend based on goal
         suggested_allocations = []

@@ -315,12 +315,27 @@ class PoeNinjaAPI:
         Returns:
             Normalized character data with all stats
         """
+        def _coerce_str(value: Any, default: str = "Unknown") -> str:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                return value
+            return str(value)
+
         defensive_stats = api_data.get("defensiveStats", {})
 
         # Log what we're receiving for debugging
         logger.debug(f"🔍 Normalizing API data - defensiveStats: {len(defensive_stats)} fields")
         logger.debug(f"   Life: {defensive_stats.get('life')}, ES: {defensive_stats.get('energyShield')}, EHP: {defensive_stats.get('effectiveHealthPool')}")
         logger.debug(f"   Resistances - Fire: {defensive_stats.get('fireResistance')}, Cold: {defensive_stats.get('coldResistance')}, Lightning: {defensive_stats.get('lightningResistance')}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "poe.ninja field types: class=%r type=%s league=%r type=%s",
+                api_data.get("class"),
+                type(api_data.get("class")).__name__,
+                api_data.get("league"),
+                type(api_data.get("league")).__name__,
+            )
 
         # Map all defensive stats
         stats_dict = {
@@ -405,7 +420,7 @@ class PoeNinjaAPI:
 
         # Build normalized data structure
         # Detect ascendancy from class field
-        raw_class = api_data.get("class", "Unknown")
+        raw_class = _coerce_str(api_data.get("class", "Unknown"))
         if raw_class in ASCENDANCY_TO_BASE_CLASS:
             base_class = ASCENDANCY_TO_BASE_CLASS[raw_class]
             ascendancy = raw_class
@@ -418,18 +433,29 @@ class PoeNinjaAPI:
             ascendancy = None
 
         active_passives = self._select_active_passives(api_data)
+
+        def _normalize_item_slot(item_data: Dict[str, Any]) -> str:
+            slot = item_data.get("itemSlot")
+            if slot is None or slot == "":
+                slot = item_data.get("inventoryId")
+            if slot is None or slot == "":
+                slot = item_data.get("slot")
+            if slot is None or slot == "":
+                slot = "Unknown"
+            return _coerce_str(slot, "Unknown")
+
         normalized = {
-            "name": api_data.get("name", "Unknown"),
-            "account": api_data.get("account", "Unknown"),
+            "name": _coerce_str(api_data.get("name", "Unknown")),
+            "account": _coerce_str(api_data.get("account", "Unknown")),
             "class": base_class,
             "ascendancy": ascendancy,
             "level": api_data.get("level", 0),
-            "league": api_data.get("league", "Unknown"),
+            "league": _coerce_str(api_data.get("league", "Unknown")),
 
             # Items with details
             "items": [
                 {
-                    "slot": item.get("itemSlot", 0),
+                    "slot": _normalize_item_slot(item),
                     "name": item.get("itemData", {}).get("name", ""),
                     "type_line": item.get("itemData", {}).get("typeLine", ""),
                     "base_type": item.get("itemData", {}).get("baseType", ""),
