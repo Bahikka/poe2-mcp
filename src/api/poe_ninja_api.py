@@ -143,6 +143,29 @@ class PoeNinjaAPI:
         # Default: convert to lowercase and replace spaces with hyphens
         return league.lower().replace(" ", "-")
 
+    @staticmethod
+    def _select_active_passives(api_data: Dict[str, Any]) -> List[Any]:
+        """Select the active passive node list without merging weapon sets."""
+        passive_selection = api_data.get("passiveSelection")
+        if passive_selection:
+            return passive_selection
+
+        set_one = api_data.get("passiveSelectionSet1") or []
+        set_two = api_data.get("passiveSelectionSet2") or []
+        if api_data.get("useSecondWeaponSet") and set_two:
+            return set_two
+        if set_one:
+            return set_one
+        if set_two:
+            return set_two
+
+        return (
+            api_data.get("passives")
+            or api_data.get("passiveTree")
+            or api_data.get("hashes")
+            or []
+        )
+
     async def get_character(self, account: str, character: str, league: str = "Abyss") -> Optional[Dict[str, Any]]:
         """
         Fetch character from poe.ninja using their hidden API
@@ -394,6 +417,7 @@ class PoeNinjaAPI:
             base_class = raw_class
             ascendancy = None
 
+        active_passives = self._select_active_passives(api_data)
         normalized = {
             "name": api_data.get("name", "Unknown"),
             "account": api_data.get("account", "Unknown"),
@@ -430,7 +454,7 @@ class PoeNinjaAPI:
             "skill_dps": skill_dps,
 
             # Passives
-            "passives": api_data.get("passiveSelection", []),
+            "passives": active_passives,
             "passive_set_1": api_data.get("passiveSelectionSet1", []),
             "passive_set_2": api_data.get("passiveSelectionSet2", []),
 

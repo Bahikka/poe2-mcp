@@ -602,13 +602,7 @@ class CharacterFetcher:
         # Check if this is poe.ninja format with charModel
         char_model = raw_data.get('charModel', raw_data)
 
-        passive_data = (
-            char_model.get('passiveSelection') or  # poe.ninja format: list of node IDs
-            char_model.get('passives') or          # Alternative format
-            char_model.get('passiveTree') or       # Another alternative
-            char_model.get('hashes') or            # Official API format
-            []
-        )
+        passive_data = self._select_active_passives(char_model)
         passive_nodes = self._normalize_passive_nodes(passive_data)
 
         return {
@@ -630,6 +624,29 @@ class CharacterFetcher:
             'pob_export': char_model.get('pathOfBuildingExport', ''),
             'raw_data': raw_data  # Keep original data for reference
         }
+
+    @staticmethod
+    def _select_active_passives(char_model: Dict[str, Any]) -> Any:
+        """Pick the active passive selection without merging weapon sets."""
+        passive_selection = char_model.get('passiveSelection')
+        if passive_selection:
+            return passive_selection
+
+        set_one = char_model.get('passiveSelectionSet1') or []
+        set_two = char_model.get('passiveSelectionSet2') or []
+        if char_model.get('useSecondWeaponSet') and set_two:
+            return set_two
+        if set_one:
+            return set_one
+        if set_two:
+            return set_two
+
+        return (
+            char_model.get('passives')
+            or char_model.get('passiveTree')
+            or char_model.get('hashes')
+            or []
+        )
 
     @staticmethod
     def _normalize_passive_nodes(passive_data: Any) -> List[int]:
