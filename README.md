@@ -147,7 +147,7 @@ Check each platform's documentation for MCP server configuration.
 
 ---
 
-## Available Tools (32 Registered)
+## Available Tools (37 Registered)
 
 Once connected, you can ask your AI assistant to use these tools:
 
@@ -156,6 +156,7 @@ Once connected, you can ask your AI assistant to use these tools:
 |------|-------------|
 | `analyze_character` | Full character analysis (defenses, skills, gear, passives) |
 | `import_poe_ninja_url` | Import character from poe.ninja URL directly |
+| `import_poe_ninja_url_verbose` | Import poe.ninja URL with verbose JSON diagnostics |
 | `compare_to_top_players` | Compare your build to ladder leaders |
 | `analyze_passive_tree` | Analyze allocated passive nodes |
 
@@ -214,6 +215,10 @@ Once connected, you can ask your AI assistant to use these tools:
 | `get_formula` | Get calculation formulas |
 | `health_check` | Check server status |
 | `clear_cache` | Clear cached data |
+| `debug_fetch_character_raw` | Save raw poe.ninja JSON to `./debug_dumps` |
+| `debug_summarize_items` | Summarize item schema from a raw JSON dump |
+| `list_overviews` | List known poe.ninja overview slugs |
+| `set_default_overview` | Set default overview slug for poe.ninja requests |
 
 > **Note:** Additional tools (DPS calculator, EHP calculator, optimizers) have handlers implemented but are not yet registered. These may be enabled in future updates.
 
@@ -337,7 +342,7 @@ python launch.py
 ```
 
 ### Key Files
-- `src/mcp_server.py` - MCP server with 32 registered tools
+- `src/mcp_server.py` - MCP server with 37 registered tools
 - `src/data/mod_data_provider.py` - Item mod data access layer
 - `src/calculator/ehp_calculator.py` - EHP calculations
 - `src/optimizer/gem_synergy_calculator.py` - Support gem logic
@@ -357,6 +362,12 @@ python launch.py
 - Your character must be on poe.ninja (public ladder)
 - Character name is case-sensitive
 - Try the full poe.ninja URL with `import_poe_ninja_url`
+
+### Debugging poe.ninja imports (fast recipe)
+1. Run verbose import: `import_poe_ninja_url_verbose` and inspect `items_len` + `request_url`.
+2. Dump raw JSON: `debug_fetch_character_raw` for account/character.
+3. Summarize schema: `debug_summarize_items` on the saved JSON file.
+4. Patch parsers based on the schema output.
 
 ### Tools return empty results
 - Database may need initialization: `python launch.py` handles this

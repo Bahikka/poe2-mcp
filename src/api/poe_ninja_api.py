@@ -7,6 +7,7 @@ import httpx
 import json
 import logging
 from typing import Dict, List, Optional, Any
+from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 from datetime import datetime
 
@@ -112,6 +113,7 @@ class PoeNinjaAPI:
         self.api_base = f"{self.base_url}/api/data"
         self.rate_limiter = rate_limiter or RateLimiter(rate_limit=20)
         self.cache_manager = cache_manager
+        self.default_overview: Optional[str] = None
         self.client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=True,
@@ -194,7 +196,17 @@ class PoeNinjaAPI:
             logger.info(f"🔍 Fetching character: {character} (Account: {account}, League: {league})")
 
             # Use the discovered hidden API endpoint
-            char_data = await self._fetch_character_from_api(account, character, league)
+            fetch_result = await self.fetch_character_verbose(
+                account=account,
+                character=character,
+                league=league,
+                overview=None,
+                allow_html_fallback=True,
+            )
+            if fetch_result.get("source") == "poe_ninja_json" and fetch_result.get("data"):
+                char_data = self._normalize_api_character_data(fetch_result["data"])
+            else:
+                char_data = fetch_result.get("data")
 
             if char_data and self.cache_manager:
                 await self.cache_manager.set(cache_key, char_data, ttl=3600)
@@ -231,79 +243,254 @@ class PoeNinjaAPI:
             logger.error(f"❌ Failed to fetch index state: {e}")
             return None
 
-    async def _fetch_character_from_api(self, account: str, character: str, league: str) -> Optional[Dict[str, Any]]:
+    def _build_character_request_url(self, base_url: str, params: Dict[str, Any]) -> str:
+        """Build a URL with encoded params (unicode-safe, no double encoding)."""
+        query_string = urlencode(params, doseq=True, encoding="utf-8", safe="")
+        return f"{base_url}?{query_string}"
+
+    def _extract_items(self, api_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract items from multiple possible keys and normalize wrapper formats."""
+        item_container = None
+        for key in ("items", "equipment", "gear"):
+            if key in api_data and api_data.get(key):
+                item_container = api_data.get(key)
+                break
+
+        if not item_container:
+            return []
+
+        if isinstance(item_container, dict):
+            items_list = list(item_container.values())
+        elif isinstance(item_container, list):
+            items_list = item_container
+        else:
+            return []
+
+        normalized_items = []
+        for item in items_list:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("itemData"), dict):
+                normalized_items.append(item)
+            else:
+                normalized_items.append({"itemData": item, **item})
+        return normalized_items
+
+    def set_default_overview(self, overview: Optional[str]) -> None:
+        """Set a default overview slug to try before league snapshots."""
+        self.default_overview = overview or None
+
+    async def list_overviews(self) -> List[Dict[str, Any]]:
+        """List known overview slugs from poe.ninja index-state."""
+        index_state = await self._get_index_state()
+        if not index_state:
+            return []
+        return [
+            {
+                "url": snapshot.get("url"),
+                "snapshotName": snapshot.get("snapshotName"),
+                "version": snapshot.get("version"),
+            }
+            for snapshot in index_state.get("snapshotVersions", [])
+        ]
+
+    async def fetch_character_verbose(
+        self,
+        account: str,
+        character: str,
+        league: str = "Abyss",
+        overview: Optional[str] = None,
+        allow_html_fallback: bool = False,
+    ) -> Dict[str, Any]:
         """
-        Fetch character using the discovered hidden API
-
-        API Endpoint: /poe2/api/builds/{version}/character
-        Parameters: account, name, overview
-
-        Args:
-            account: Account name
-            character: Character name
-            league: League name
-
-        Returns:
-            Character data dictionary or None if not found
+        Fetch character using the discovered hidden API with verbose diagnostics.
         """
+        result: Dict[str, Any] = {
+            "resolved_account": account,
+            "resolved_character": character,
+            "league": league,
+            "overview": overview,
+            "build_version": None,
+            "request_url": None,
+            "http_status": None,
+            "content_type": None,
+            "raw_top_keys": [],
+            "items_key_present": False,
+            "items_type": "none",
+            "items_len": None,
+            "fallback_used": False,
+            "source": "poe_ninja_json",
+            "exception": None,
+            "overview_attempts": [],
+            "data": None,
+        }
+
         try:
             # Step 1: Get index state to find the snapshot version for this league
             index_state = await self._get_index_state()
             if not index_state:
-                logger.warning("⚠️ Could not get index state, falling back to HTML scraping")
-                return await self._scrape_character_page(account, character, league)
+                message = "Could not get index state from poe.ninja."
+                logger.warning(f"⚠️ {message}")
+                result["exception"] = message
+                if allow_html_fallback:
+                    result["fallback_used"] = True
+                    result["source"] = "html_fallback"
+                    result["data"] = await self._scrape_character_page(account, character, league, warning=message)
+                return result
 
             # Step 2: Find the snapshot version for our league
             league_slug = self._get_league_slug(league)
-            snapshot = None
-
-            for snap in index_state.get("snapshotVersions", []):
-                if snap.get("url") == league_slug:
-                    snapshot = snap
-                    break
+            snapshot = next(
+                (snap for snap in index_state.get("snapshotVersions", []) if snap.get("url") == league_slug),
+                None,
+            )
+            standard_snapshot = next(
+                (snap for snap in index_state.get("snapshotVersions", []) if snap.get("url") == "standard"),
+                None,
+            )
 
             if not snapshot:
-                logger.warning(f"⚠️ No snapshot found for league '{league}' (slug: '{league_slug}')")
+                message = f"No snapshot found for league '{league}' (slug: '{league_slug}')"
+                logger.warning(f"⚠️ {message}")
                 logger.warning(f"   Available leagues: {[s.get('url') for s in index_state.get('snapshotVersions', [])]}")
-                return await self._scrape_character_page(account, character, league)
+                result["exception"] = message
+                if allow_html_fallback:
+                    result["fallback_used"] = True
+                    result["source"] = "html_fallback"
+                    result["data"] = await self._scrape_character_page(account, character, league, warning=message)
+                return result
 
-            version = snapshot.get("version")
-            overview = snapshot.get("snapshotName")
+            configured_overview = overview or self.default_overview
+            attempts: List[Dict[str, Any]] = []
 
-            logger.info(f"📡 Using snapshot version: {version}, overview: {overview}")
+            if configured_overview:
+                attempts.append(
+                    {
+                        "overview": configured_overview,
+                        "version": snapshot.get("version"),
+                        "label": "configured",
+                    }
+                )
 
-            # Step 3: Call the character API
-            url = f"{self.base_url}/poe2/api/builds/{version}/character"
-            params = {
-                "account": account,
-                "name": character,
-                "overview": overview
-            }
+            attempts.append(
+                {
+                    "overview": snapshot.get("snapshotName"),
+                    "version": snapshot.get("version"),
+                    "label": "league_snapshot",
+                }
+            )
 
-            logger.debug(f"Calling API: {url}")
-            logger.debug(f"Parameters: {params}")
+            attempts.append(
+                {
+                    "overview": "current",
+                    "version": snapshot.get("version"),
+                    "label": "current",
+                }
+            )
 
-            response = await self.client.get(url, params=params)
+            if standard_snapshot:
+                attempts.append(
+                    {
+                        "overview": standard_snapshot.get("snapshotName"),
+                        "version": standard_snapshot.get("version"),
+                        "label": "standard",
+                    }
+                )
 
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"✅ Successfully fetched character from API")
-                logger.debug(f"   Character: {data.get('name')}, Level: {data.get('level', 'Unknown')}, Class: {data.get('class', 'Unknown')}")
-                return self._normalize_api_character_data(data)
+            seen = set()
+            filtered_attempts = []
+            for attempt in attempts:
+                key = (attempt.get("version"), attempt.get("overview"))
+                if key in seen or not attempt.get("version") or not attempt.get("overview"):
+                    continue
+                seen.add(key)
+                filtered_attempts.append(attempt)
 
-            elif response.status_code == 404:
-                logger.warning(f"⚠️ Character not found (404)")
-                return None
+            for attempt in filtered_attempts:
+                version = attempt["version"]
+                overview_value = attempt["overview"]
+                url = f"{self.base_url}/poe2/api/builds/{version}/character"
+                params = {"account": account, "name": character, "overview": overview_value}
 
-            else:
-                logger.warning(f"⚠️ API returned {response.status_code}")
-                logger.debug(f"   Response: {response.text[:200]}")
-                return await self._scrape_character_page(account, character, league)
+                request_url = self._build_character_request_url(url, params)
+                logger.debug(f"Calling API: {request_url}")
+
+                response = await self.client.get(url, params=params)
+                content_type = response.headers.get("content-type", "")
+
+                attempt_record = {
+                    "overview": overview_value,
+                    "version": version,
+                    "request_url": str(response.request.url) if response.request else request_url,
+                    "http_status": response.status_code,
+                    "content_type": content_type,
+                    "items_len": None,
+                    "error": None,
+                }
+
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except Exception as e:
+                        attempt_record["error"] = f"JSON parse error: {e}"
+                        result["exception"] = attempt_record["error"]
+                        result["overview_attempts"].append(attempt_record)
+                        continue
+
+                    items = self._extract_items(data)
+                    attempt_record["items_len"] = len(items)
+                    result["overview_attempts"].append(attempt_record)
+
+                    result.update(
+                        {
+                            "overview": overview_value,
+                            "build_version": version,
+                            "request_url": attempt_record["request_url"],
+                            "http_status": response.status_code,
+                            "content_type": content_type,
+                            "raw_top_keys": list(data.keys()) if isinstance(data, dict) else [],
+                            "items_key_present": any(key in data for key in ("items", "equipment", "gear")),
+                            "items_type": (
+                                "dict"
+                                if isinstance(data.get("items") or data.get("equipment") or data.get("gear"), dict)
+                                else "list"
+                                if isinstance(data.get("items") or data.get("equipment") or data.get("gear"), list)
+                                else "none"
+                            ),
+                            "items_len": len(items),
+                            "data": data,
+                        }
+                    )
+
+                    if items:
+                        logger.info("✅ Successfully fetched character from API with items")
+                        return result
+
+                    logger.warning("⚠️ API response contained no items, retrying with next overview")
+                    continue
+
+                attempt_record["error"] = f"HTTP {response.status_code}"
+                if response.status_code != 404:
+                    logger.warning(f"⚠️ API returned {response.status_code} for overview {overview_value}")
+                result["overview_attempts"].append(attempt_record)
+
+            message = "API requests completed without usable items."
+            result["exception"] = message
+            if allow_html_fallback:
+                result["fallback_used"] = True
+                result["source"] = "html_fallback"
+                result["data"] = await self._scrape_character_page(account, character, league, warning=message)
+            return result
 
         except Exception as e:
             logger.error(f"❌ API fetch failed: {e}", exc_info=True)
-            logger.info("   Falling back to HTML scraping")
-            return await self._scrape_character_page(account, character, league)
+            result["exception"] = str(e)
+            if allow_html_fallback:
+                logger.info("   Falling back to HTML scraping")
+                result["fallback_used"] = True
+                result["source"] = "html_fallback"
+                result["data"] = await self._scrape_character_page(account, character, league, warning=str(e))
+            return result
 
     def _normalize_api_character_data(self, api_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -433,6 +620,7 @@ class PoeNinjaAPI:
             ascendancy = None
 
         active_passives = self._select_active_passives(api_data)
+        extracted_items = self._extract_items(api_data)
 
         def _normalize_item_slot(item_data: Dict[str, Any]) -> str:
             slot = item_data.get("itemSlot")
@@ -440,6 +628,9 @@ class PoeNinjaAPI:
                 slot = item_data.get("inventoryId")
             if slot is None or slot == "":
                 slot = item_data.get("slot")
+            if slot is None and isinstance(item_data.get("itemData"), dict):
+                nested = item_data["itemData"]
+                slot = nested.get("itemSlot") or nested.get("inventoryId") or nested.get("slot")
             if slot is None or slot == "":
                 slot = "Unknown"
             return _coerce_str(slot, "Unknown")
@@ -456,21 +647,21 @@ class PoeNinjaAPI:
             "items": [
                 {
                     "slot": _normalize_item_slot(item),
-                    "name": item.get("itemData", {}).get("name", ""),
-                    "type_line": item.get("itemData", {}).get("typeLine", ""),
-                    "base_type": item.get("itemData", {}).get("baseType", ""),
-                    "item_level": item.get("itemData", {}).get("ilvl", 0),
-                    "rarity": item.get("itemData", {}).get("frameType", 0),
-                    "corrupted": item.get("itemData", {}).get("corrupted", False),
-                    "icon": item.get("itemData", {}).get("icon", ""),
+                    "name": (item.get("itemData") or item).get("name", ""),
+                    "type_line": (item.get("itemData") or item).get("typeLine", ""),
+                    "base_type": (item.get("itemData") or item).get("baseType", ""),
+                    "item_level": (item.get("itemData") or item).get("ilvl", 0),
+                    "rarity": (item.get("itemData") or item).get("frameType", 0),
+                    "corrupted": (item.get("itemData") or item).get("corrupted", False),
+                    "icon": (item.get("itemData") or item).get("icon", ""),
                     "mods": {
-                        "implicit": item.get("itemData", {}).get("implicitMods", []),
-                        "explicit": item.get("itemData", {}).get("explicitMods", []),
-                        "crafted": item.get("itemData", {}).get("craftedMods", []),
-                        "enchant": item.get("itemData", {}).get("enchantMods", [])
+                        "implicit": (item.get("itemData") or item).get("implicitMods", []),
+                        "explicit": (item.get("itemData") or item).get("explicitMods", []),
+                        "crafted": (item.get("itemData") or item).get("craftedMods", []),
+                        "enchant": (item.get("itemData") or item).get("enchantMods", [])
                     }
                 }
-                for item in api_data.get("items", [])
+                for item in extracted_items
             ],
 
             # Skills (raw)
@@ -548,6 +739,7 @@ class PoeNinjaAPI:
 
             # Metadata
             "source": "poe.ninja API",
+            "data_source": "poe_ninja_json",
             "fetched_at": datetime.utcnow().isoformat(),
             "weapon_swap_active": api_data.get("useSecondWeaponSet", False)
         }
@@ -563,7 +755,13 @@ class PoeNinjaAPI:
 
         return normalized
 
-    async def _scrape_character_page(self, account: str, character: str, league: str = "Abyss") -> Optional[Dict[str, Any]]:
+    async def _scrape_character_page(
+        self,
+        account: str,
+        character: str,
+        league: str = "Abyss",
+        warning: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Scrape character data from poe.ninja profile page
 
@@ -597,7 +795,12 @@ class PoeNinjaAPI:
 
                     if response.status_code == 200:
                         logger.info(f"✅ Successfully fetched from: {url}")
-                        return await self._parse_character_html(response.text, account, character)
+                        parsed = await self._parse_character_html(response.text, account, character)
+                        if parsed:
+                            parsed["source"] = "html_fallback"
+                            if warning:
+                                parsed.setdefault("warnings", []).append(warning)
+                        return parsed
                     else:
                         logger.debug(f"  [{i}/{len(urls)}] Non-200 status: {response.status_code}")
 
