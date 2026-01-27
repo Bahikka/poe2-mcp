@@ -73,6 +73,7 @@ class BuildAnalysis:
     nearest_notables: List[Tuple[ResolvedNode, int]]  # (node, distance)
     class_start: Optional[str] = None
     unresolved_nodes: List[int] = field(default_factory=list)  # Node IDs not in database (e.g., ascendancy)
+    ascendancy_nodes_present: List[int] = field(default_factory=list)
     tree_region: Optional[str] = None  # Estimated tree region based on coordinate analysis
     connectivity_note: Optional[str] = None  # Explanation of connectivity status
 
@@ -97,42 +98,15 @@ class PassiveTreeResolver:
         print(f"Distance: {path.distance} nodes")
     """
 
-    # Class starting node IDs (PoE2)
-    # PoE2 has 8 playable classes but only 6 starting positions (hexagon pattern)
-    # Classes with the same attribute(s) share a starting position.
-    # Position naming uses PSG/PoE1 internal names for the node IDs.
-    #
-    # Hexagon layout (Y negative = top, Y positive = bottom):
-    #                SORCERESS/WITCH (54447) - INT top
-    #               /                        \
-    #   DRUID (61525)                        MONK (44683)
-    #   STR/INT top-left                     DEX/INT top-right
-    #              |                          |
-    #   WARRIOR (47175)                      RANGER/HUNTRESS (50459)
-    #   STR bottom-left                      DEX bottom-right
-    #               \                        /
-    #                MERCENARY (50986) - STR/DEX bottom
-    # NOTE: Node IDs are aligned with PSG_STARTING_NODES in characters_spec.py.
-    CLASS_STARTS = {
-        47175: "WARRIOR",      # MARAUDER position - Pure STR (bottom-left)
-        50459: "RANGER",       # RANGER position - Pure DEX (bottom-right) - shared by Ranger & Huntress
-        54447: "SORCERESS",    # WITCH position - Pure INT (top) - shared by Sorceress & Witch
-        50986: "MONK",         # SHADOW position - DEX/INT hybrid (top-right)
-        61525: "DRUID",        # TEMPLAR position - STR/INT hybrid (top-left)
-        44683: "MERCENARY",    # DUELIST position - STR/DEX hybrid (bottom-center)
-    }
-
-    # Reverse mapping: class name to starting node ID
-    # Multiple classes can map to the same node (shared positions)
-    CLASS_TO_START_NODE = {
-        "WARRIOR": 47175,
-        "RANGER": 50459,
-        "HUNTRESS": 50459,     # Huntress (DEX) shares Ranger's starting position
-        "SORCERESS": 54447,
-        "WITCH": 54447,        # Witch (INT) shares Sorceress's starting position
-        "MERCENARY": 44683,
-        "DRUID": 61525,
-        "MONK": 50986,
+    # Class starting node IDs (PoE2 fallback).
+    # Prefer loading from passive_tree_regions.json metadata.class_starts to avoid drift.
+    FALLBACK_CLASS_STARTS = {
+        47175: "WARRIOR",
+        50459: "RANGER",
+        54447: "SORCERESS",
+        50986: "MERCENARY",
+        61525: "DRUID",
+        44683: "MONK",
     }
 
     # PoE2 Ascendancies mapped to base class
@@ -232,14 +206,12 @@ class PassiveTreeResolver:
     # Class starting positions (authoritative coordinates from PSG data)
     # Note: Multiple classes share the same starting coordinates
     CLASS_START_COORDS = {
-        "RANGER": {"x": 1274.675, "y": 735.845},       # Also Huntress
-        "HUNTRESS": {"x": 1274.675, "y": 735.845},    # Same as Ranger
+        "RANGER": {"x": 1274.675, "y": 735.845},
         "WARRIOR": {"x": -1271.185, "y": 733.095},
-        "MERCENARY": {"x": 1.945, "y": 1469.815},     # Bottom center (was DUELIST)
-        "DRUID": {"x": -1245.175, "y": -728.895},     # Top-left (was TEMPLAR)
-        "SORCERESS": {"x": 0.005, "y": -1490.585},    # Also Witch
-        "WITCH": {"x": 0.005, "y": -1490.585},        # Same as Sorceress
-        "MONK": {"x": 1270.425, "y": -728.835},       # Top-right (was SHADOW)
+        "MERCENARY": {"x": 1.945, "y": 1469.815},
+        "DRUID": {"x": -1245.175, "y": -728.895},
+        "SORCERESS": {"x": 0.005, "y": -1490.585},
+        "MONK": {"x": 1270.425, "y": -728.835},
     }
 
     def __init__(self, data_dir: Optional[Path] = None):
@@ -259,6 +231,49 @@ class PassiveTreeResolver:
         self._node_regions: Dict[int, str] = {}  # Cached node -> region mapping
         self._loaded = False
         self._regions_loaded = False
+        self._class_starts, self._class_start_coords, self._class_start_nodes_by_name = (
+            self._load_class_start_metadata()
+        )
+
+        logger.info("PassiveTreeResolver module path: %s", Path(__file__).resolve())
+
+    def _load_class_start_metadata(self) -> Tuple[Dict[int, str], Dict[str, Dict[str, float]], Dict[str, int]]:
+        """Load class start node IDs and coordinates from passive_tree_regions.json."""
+        regions_path = self.data_dir / "passive_tree_regions.json"
+        class_starts: Dict[int, str] = {}
+        class_coords: Dict[str, Dict[str, float]] = {}
+        class_nodes_by_name: Dict[str, int] = {}
+
+        if regions_path.exists():
+            try:
+                with open(regions_path, 'r', encoding='utf-8') as f:
+                    regions_data = json.load(f)
+                metadata = regions_data.get("metadata", {})
+                start_data = metadata.get("class_starts", {})
+                for class_name, info in start_data.items():
+                    normalized = class_name.strip().upper()
+                    node_id = int(info.get("node_id"))
+                    class_starts[node_id] = normalized
+                    class_nodes_by_name[normalized] = node_id
+                    class_coords[normalized] = {
+                        "x": float(info.get("x", 0.0)),
+                        "y": float(info.get("y", 0.0)),
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to load class start metadata: {e}")
+
+        if not class_starts:
+            class_starts = dict(self.FALLBACK_CLASS_STARTS)
+            class_nodes_by_name = {name: node_id for node_id, name in class_starts.items()}
+            class_coords = dict(self.CLASS_START_COORDS)
+            logger.warning("Using fallback class start mapping; passive_tree_regions.json missing or invalid.")
+
+        # Aliases share base class start nodes
+        for alias, base in {"HUNTRESS": "RANGER", "WITCH": "SORCERESS"}.items():
+            if base in class_nodes_by_name:
+                class_nodes_by_name[alias] = class_nodes_by_name[base]
+
+        return class_starts, class_coords, class_nodes_by_name
 
     def _ensure_loaded(self):
         """Load node database if not already loaded."""
@@ -343,7 +358,7 @@ class PassiveTreeResolver:
         best_region = "UNKNOWN"
         best_distance = float('inf')
 
-        for region_name, coords in self.CLASS_START_COORDS.items():
+        for region_name, coords in self._class_start_coords.items():
             distance = math.sqrt((x - coords["x"]) ** 2 + (y - coords["y"]) ** 2)
             if distance < best_distance:
                 best_distance = distance
@@ -577,6 +592,7 @@ class PassiveTreeResolver:
         small_nodes = []
         jewel_sockets = []
         unresolved = []
+        ascendancy_nodes_present = []
 
         node_set = set(node_ids)
 
@@ -594,6 +610,8 @@ class PassiveTreeResolver:
                 jewel_sockets.append(node)
             else:
                 small_nodes.append(node)
+            if node.is_ascendancy:
+                ascendancy_nodes_present.append(nid)
 
         # Check connectivity (only among resolved nodes)
         is_connected = self._check_connectivity(node_ids)
@@ -623,6 +641,8 @@ class PassiveTreeResolver:
                 connectivity_note = "Some allocated nodes appear disconnected. This may indicate a tree pathing issue."
         elif unresolved:
             connectivity_note = f"Note: {len(unresolved)} nodes are ascendancy or special nodes not in the main tree database."
+        elif ascendancy_nodes_present:
+            connectivity_note = "Ascendancy nodes are excluded from connectivity checks."
 
         return BuildAnalysis(
             total_nodes=len(node_ids),
@@ -634,6 +654,7 @@ class PassiveTreeResolver:
             nearest_notables=nearest_notables,
             class_start=class_start,
             unresolved_nodes=unresolved,
+            ascendancy_nodes_present=ascendancy_nodes_present,
             tree_region=tree_region,
             connectivity_note=connectivity_note
         )
@@ -657,7 +678,18 @@ class PassiveTreeResolver:
             if asc_class:
                 normalized_class = asc_class
 
-        if normalized_class and normalized_class in self.CLASS_TO_START_NODE:
+        if node_set:
+            matched_starts = [self._class_starts[nid] for nid in node_set if nid in self._class_starts]
+            if matched_starts:
+                if (
+                    normalized_class
+                    and normalized_class in self._class_start_nodes_by_name
+                    and self._class_start_nodes_by_name[normalized_class] in node_set
+                ):
+                    return normalized_class
+                return sorted(matched_starts)[0]
+
+        if normalized_class and normalized_class in self._class_start_nodes_by_name:
             return normalized_class
 
         if not node_set:
@@ -665,7 +697,7 @@ class PassiveTreeResolver:
 
         best_class = None
         best_distance = float('inf')
-        for start_node_id, start_class in self.CLASS_STARTS.items():
+        for start_node_id, start_class in self._class_starts.items():
             distance = self._distance_to_any_allocated(start_node_id, node_set)
             if distance is None:
                 continue
@@ -715,8 +747,12 @@ class PassiveTreeResolver:
         if not node_ids:
             return True
 
-        # Filter to only nodes we have in our adjacency graph
-        resolved_nodes = [nid for nid in node_ids if nid in self._adjacency]
+        # Filter to only non-ascendancy nodes in our adjacency graph
+        resolved_nodes = [
+            nid
+            for nid in node_ids
+            if nid in self._adjacency and not self._nodes.get(nid, {}).get("is_ascendancy", False)
+        ]
 
         if not resolved_nodes:
             # No nodes in our database - can't determine connectivity

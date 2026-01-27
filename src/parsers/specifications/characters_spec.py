@@ -89,10 +89,10 @@ ATTRIBUTE_TO_PSG_INDEX = {
 PSG_STARTING_NODES = {
     0: 50459,   # Ranger/Huntress (Dex)
     1: 47175,   # Warrior/Marauder (Str)
-    2: 50986,   # Monk/Shadow (DexInt)
-    3: 61525,   # Witch/Sorceress (Int) - NOTE: poe.ninja may call this "WITCH"
-    4: 54447,   # Druid/Templar (StrInt) - NOTE: poe.ninja may call this "SORCERESS"
-    5: 44683,   # Mercenary/Duelist (StrDex)
+    2: 44683,   # Monk/Shadow (DexInt)
+    3: 54447,   # Sorceress/Witch (Int)
+    4: 61525,   # Druid/Templar (StrInt)
+    5: 50986,   # Mercenary/Duelist (StrDex)
 }
 
 
@@ -112,10 +112,10 @@ POE_NINJA_CLASS_TO_PSG_INDEX = {
 POE_NINJA_CLASS_TO_STARTING_NODE = {
     'Ranger': 50459,
     'Warrior': 47175,
-    'Monk': 50986,
-    'Witch': 61525,
-    'Sorceress': 54447,  # This is StrInt (Druid/Templar in game files)
-    'Mercenary': 44683,
+    'Monk': 44683,
+    'Witch': 54447,
+    'Sorceress': 54447,
+    'Mercenary': 50986,
 }
 
 
