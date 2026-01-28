@@ -3,6 +3,8 @@ Configuration management for PoE2 Build Optimizer
 """
 from pathlib import Path
 from typing import List, Optional
+import secrets
+import sys
 from pydantic_settings import BaseSettings
 from pydantic import Field, ConfigDict
 import yaml
@@ -13,6 +15,7 @@ BASE_DIR = Path(__file__).parent.parent.resolve()
 DATA_DIR = BASE_DIR / "data"
 CACHE_DIR = BASE_DIR / "cache"
 LOGS_DIR = BASE_DIR / "logs"
+ENV_FILE_PATH = BASE_DIR / ".env"
 
 # Ensure directories exist
 DATA_DIR.mkdir(exist_ok=True, parents=True)
@@ -90,12 +93,12 @@ class Settings(BaseSettings):
     # CRITICAL: These must be set via environment variables (.env file)
     # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
     # Never commit actual secrets to version control
-    SECRET_KEY: str = Field(
-        ...,  # Required, no default
+    SECRET_KEY: Optional[str] = Field(
+        default=None,
         description="Cryptographically secure random key for session management"
     )
-    ENCRYPTION_KEY: str = Field(
-        ...,  # Required, no default
+    ENCRYPTION_KEY: Optional[str] = Field(
+        default=None,
         description="Cryptographically secure random key for data encryption"
     )
     SESSION_TIMEOUT: int = Field(default=86400)
@@ -111,7 +114,7 @@ class Settings(BaseSettings):
     PROMETHEUS_PORT: int = Field(default=9090)
 
     model_config = ConfigDict(
-        env_file=str(BASE_DIR / ".env"),  # Use absolute path
+        env_file=str(ENV_FILE_PATH),  # Use absolute path
         env_file_encoding="utf-8",
         case_sensitive=True
     )
@@ -128,6 +131,55 @@ def load_yaml_config(config_path: str = "config.yaml") -> dict:
 
 # Global settings instance
 settings = Settings()
+
+
+def _persist_missing_keys(values: dict) -> None:
+    if not values:
+        return
+    existing_keys = set()
+    if ENV_FILE_PATH.exists():
+        content = ENV_FILE_PATH.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            existing_keys.add(key)
+    else:
+        content = ""
+
+    new_lines = []
+    for key, value in values.items():
+        if key not in existing_keys:
+            new_lines.append(f"{key}={value}")
+
+    if not new_lines:
+        return
+
+    updated = content.rstrip("\n")
+    if updated:
+        updated += "\n"
+    updated += "\n".join(new_lines) + "\n"
+    ENV_FILE_PATH.write_text(updated, encoding="utf-8")
+
+
+def _ensure_security_keys() -> None:
+    missing = {}
+    if not settings.SECRET_KEY:
+        missing["SECRET_KEY"] = secrets.token_hex(32)
+        object.__setattr__(settings, "SECRET_KEY", missing["SECRET_KEY"])
+    if not settings.ENCRYPTION_KEY:
+        missing["ENCRYPTION_KEY"] = secrets.token_hex(32)
+        object.__setattr__(settings, "ENCRYPTION_KEY", missing["ENCRYPTION_KEY"])
+    if missing:
+        _persist_missing_keys(missing)
+        sys.stderr.write(
+            "[MCP-SERVER] Generated missing security keys and saved them to .env\n"
+        )
+        sys.stderr.flush()
+
+
+_ensure_security_keys()
 
 # Load additional YAML config if exists
 yaml_config = load_yaml_config()
