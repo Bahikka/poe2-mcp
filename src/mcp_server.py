@@ -7,6 +7,7 @@ Main server implementation with MCP protocol support
 import asyncio
 import json
 import logging
+import os
 import sys
 from urllib.parse import unquote
 from pathlib import Path
@@ -111,6 +112,23 @@ debug_log("=== PoE2 Build Optimizer MCP Server ===")
 debug_log(f"Python version: {sys.version}")
 debug_log(f"Working directory: {Path.cwd()}")
 debug_log(f"Script location: {__file__}")
+
+
+def _unicode_json_roundtrip_check(account_name: str) -> None:
+    """Verify Unicode account names can round-trip through JSON."""
+    payload = {"account": account_name}
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False)
+        parsed = json.loads(serialized)
+        if parsed.get("account") != account_name:
+            raise ValueError("Account name mismatch after JSON round-trip.")
+    except Exception as exc:
+        print(
+            f"[MCP-SERVER] Unicode JSON round-trip failed: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(1) from exc
 
 
 class PoE2BuildOptimizerMCP:
@@ -5949,6 +5967,14 @@ async def main():
     """Main entry point"""
     debug_log("=== main() function called ===")
     try:
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+        os.environ.setdefault("NO_COLOR", "1")
+        account_name = (
+            os.getenv("POE_ACCOUNT_NAME")
+            or os.getenv("MCP_ACCOUNT_NAME")
+            or "🅱🄰🅷🅸🅺🅺🄰#1456"
+        )
+        _unicode_json_roundtrip_check(account_name)
         debug_log("Creating PoE2BuildOptimizerMCP instance...")
         server = PoE2BuildOptimizerMCP()
         debug_log("Server instance created, calling run()...")
