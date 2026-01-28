@@ -56,6 +56,10 @@ class TradeAuthHelper:
         input("Press Enter to open the browser and begin authentication...")
         print()
 
+        if sys.platform.startswith("win"):
+            loop_name = type(asyncio.get_running_loop()).__name__
+            print(f"Using asyncio event loop: {loop_name}")
+
         async with async_playwright() as p:
             # Launch browser in headed mode (user can see it)
             print("Opening browser...")
@@ -253,9 +257,13 @@ async def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
-    if sys.platform == 'win32':
-        # Windows-specific: Set up event loop policy
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+def run_main():
+    if sys.platform.startswith("win"):
+        with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
+            runner.run(main())
+    else:
+        asyncio.run(main())
 
-    asyncio.run(main())
+
+if __name__ == "__main__":
+    run_main()
