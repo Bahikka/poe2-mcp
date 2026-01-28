@@ -6,8 +6,9 @@ Fetches character data, build rankings, and economy data from poe.ninja
 import httpx
 import json
 import logging
-from typing import Dict, List, Optional, Any
-from urllib.parse import urlencode
+import unicodedata
+from typing import Dict, List, Optional, Any, Set
+from urllib.parse import quote
 from bs4 import BeautifulSoup
 from datetime import datetime
 
@@ -201,7 +202,7 @@ class PoeNinjaAPI:
                 character=character,
                 league=league,
                 overview=None,
-                allow_html_fallback=True,
+                allow_html_fallback=False,
             )
             if fetch_result.get("source") == "poe_ninja_json" and fetch_result.get("data"):
                 char_data = self._normalize_api_character_data(fetch_result["data"])
@@ -243,10 +244,33 @@ class PoeNinjaAPI:
             logger.error(f"❌ Failed to fetch index state: {e}")
             return None
 
-    def _build_character_request_url(self, base_url: str, params: Dict[str, Any]) -> str:
+    def _build_character_request_url(
+        self,
+        base_url: str,
+        params: Dict[str, Any],
+        preencoded_keys: Optional[Set[str]] = None,
+    ) -> str:
         """Build a URL with encoded params (unicode-safe, no double encoding)."""
-        query_string = urlencode(params, doseq=True, encoding="utf-8", safe="")
-        return f"{base_url}?{query_string}"
+        preencoded_keys = preencoded_keys or set()
+        encoded_pairs = []
+        for key, value in params.items():
+            key_enc = quote(str(key), safe="", encoding="utf-8")
+            value_str = str(value)
+            if key in preencoded_keys:
+                encoded_pairs.append(f"{key_enc}={value_str}")
+            else:
+                encoded_pairs.append(f"{key_enc}={quote(value_str, safe='', encoding='utf-8')}")
+        return f"{base_url}?{'&'.join(encoded_pairs)}"
+
+    @staticmethod
+    def _normalize_identity(value: str) -> str:
+        """Normalize unicode values for account/character names."""
+        return unicodedata.normalize("NFKC", value)
+
+    @staticmethod
+    def _is_preencoded(value: str) -> bool:
+        """Detect already percent-encoded unicode strings to avoid double encoding."""
+        return "%F0%9F" in value or "%f0%9f" in value
 
     def _extract_items(self, api_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extract items from multiple possible keys and normalize wrapper formats."""
@@ -305,9 +329,12 @@ class PoeNinjaAPI:
         """
         Fetch character using the discovered hidden API with verbose diagnostics.
         """
+        normalized_account = self._normalize_identity(account)
+        normalized_character = self._normalize_identity(character)
+
         result: Dict[str, Any] = {
-            "resolved_account": account,
-            "resolved_character": character,
+            "resolved_account": normalized_account,
+            "resolved_character": normalized_character,
             "league": league,
             "overview": overview,
             "build_version": None,
@@ -322,6 +349,7 @@ class PoeNinjaAPI:
             "source": "poe_ninja_json",
             "exception": None,
             "overview_attempts": [],
+            "failure_diagnostics": None,
             "data": None,
         }
 
@@ -334,90 +362,87 @@ class PoeNinjaAPI:
                 result["exception"] = message
                 if allow_html_fallback:
                     result["fallback_used"] = True
-                    result["source"] = "html_fallback"
-                    result["data"] = await self._scrape_character_page(account, character, league, warning=message)
+                    result["source"] = "html_diagnostics"
+                    result["html_diagnostics"] = await self._scrape_character_page(
+                        normalized_account,
+                        normalized_character,
+                        league,
+                        warning=message,
+                    )
                 return result
 
-            # Step 2: Find the snapshot version for our league
-            league_slug = self._get_league_slug(league)
-            snapshot = next(
-                (snap for snap in index_state.get("snapshotVersions", []) if snap.get("url") == league_slug),
-                None,
-            )
-            standard_snapshot = next(
-                (snap for snap in index_state.get("snapshotVersions", []) if snap.get("url") == "standard"),
-                None,
-            )
+            snapshot_versions = index_state.get("snapshotVersions", [])
+            overview_to_version = {
+                snapshot.get("url"): snapshot.get("version")
+                for snapshot in snapshot_versions
+                if snapshot.get("url") and snapshot.get("version")
+            }
 
-            if not snapshot:
-                message = f"No snapshot found for league '{league}' (slug: '{league_slug}')"
+            if not overview_to_version:
+                message = "No overview versions available from index state."
                 logger.warning(f"⚠️ {message}")
-                logger.warning(f"   Available leagues: {[s.get('url') for s in index_state.get('snapshotVersions', [])]}")
                 result["exception"] = message
-                if allow_html_fallback:
-                    result["fallback_used"] = True
-                    result["source"] = "html_fallback"
-                    result["data"] = await self._scrape_character_page(account, character, league, warning=message)
                 return result
 
             configured_overview = overview or self.default_overview
-            attempts: List[Dict[str, Any]] = []
-
+            preferred_overviews = ["vaal", "vaalhc", "standard", "abyss"]
+            ordered_candidates: List[str] = []
             if configured_overview:
-                attempts.append(
-                    {
-                        "overview": configured_overview,
-                        "version": snapshot.get("version"),
-                        "label": "configured",
-                    }
+                ordered_candidates.append(configured_overview)
+                ordered_candidates.extend(
+                    [ov for ov in preferred_overviews if ov != configured_overview]
                 )
-
-            attempts.append(
-                {
-                    "overview": snapshot.get("snapshotName"),
-                    "version": snapshot.get("version"),
-                    "label": "league_snapshot",
-                }
+            else:
+                ordered_candidates.extend(preferred_overviews)
+            ordered_candidates.extend(
+                [ov for ov in overview_to_version.keys() if ov not in ordered_candidates]
             )
 
-            attempts.append(
-                {
-                    "overview": "current",
-                    "version": snapshot.get("version"),
-                    "label": "current",
-                }
-            )
-
-            if standard_snapshot:
-                attempts.append(
-                    {
-                        "overview": standard_snapshot.get("snapshotName"),
-                        "version": standard_snapshot.get("version"),
-                        "label": "standard",
-                    }
-                )
-
-            seen = set()
-            filtered_attempts = []
-            for attempt in attempts:
-                key = (attempt.get("version"), attempt.get("overview"))
-                if key in seen or not attempt.get("version") or not attempt.get("overview"):
+            seen_overviews = set()
+            filtered_candidates = []
+            for candidate in ordered_candidates:
+                if candidate in seen_overviews:
                     continue
-                seen.add(key)
-                filtered_attempts.append(attempt)
+                seen_overviews.add(candidate)
+                filtered_candidates.append(candidate)
 
-            for attempt in filtered_attempts:
-                version = attempt["version"]
-                overview_value = attempt["overview"]
+            for overview_value in filtered_candidates:
+                version = overview_to_version.get(overview_value)
+                if not version:
+                    continue
+
+                expected_version = overview_to_version.get(overview_value)
+                if expected_version and expected_version != version:
+                    logger.error(
+                        "❌ Overview/version mismatch for %s: expected %s got %s. Correcting.",
+                        overview_value,
+                        expected_version,
+                        version,
+                    )
+                    version = expected_version
+
                 url = f"{self.base_url}/poe2/api/builds/{version}/character"
-                params = {"account": account, "name": character, "overview": overview_value}
+                params = {
+                    "account": normalized_account,
+                    "name": normalized_character,
+                    "overview": overview_value,
+                }
 
-                request_url = self._build_character_request_url(url, params)
+                preencoded_keys = set()
+                if self._is_preencoded(normalized_account):
+                    preencoded_keys.add("account")
+                if self._is_preencoded(normalized_character):
+                    preencoded_keys.add("name")
+
+                request_url = self._build_character_request_url(url, params, preencoded_keys)
                 logger.debug(f"Calling API: {request_url}")
 
-                response = await self.client.get(url, params=params)
-                content_type = response.headers.get("content-type", "")
+                if preencoded_keys:
+                    response = await self.client.get(request_url)
+                else:
+                    response = await self.client.get(url, params=params)
 
+                content_type = response.headers.get("content-type", "")
                 attempt_record = {
                     "overview": overview_value,
                     "version": version,
@@ -425,18 +450,22 @@ class PoeNinjaAPI:
                     "http_status": response.status_code,
                     "content_type": content_type,
                     "items_len": None,
+                    "is_json": False,
+                    "json_keys": [],
                     "error": None,
                 }
 
-                if response.status_code == 200:
+                data = None
+                if "json" in content_type:
                     try:
                         data = response.json()
+                        attempt_record["is_json"] = True
+                        attempt_record["json_keys"] = list(data.keys()) if isinstance(data, dict) else []
                     except Exception as e:
                         attempt_record["error"] = f"JSON parse error: {e}"
                         result["exception"] = attempt_record["error"]
-                        result["overview_attempts"].append(attempt_record)
-                        continue
 
+                if response.status_code == 200 and data is not None:
                     items = self._extract_items(data)
                     attempt_record["items_len"] = len(items)
                     result["overview_attempts"].append(attempt_record)
@@ -448,7 +477,7 @@ class PoeNinjaAPI:
                             "request_url": attempt_record["request_url"],
                             "http_status": response.status_code,
                             "content_type": content_type,
-                            "raw_top_keys": list(data.keys()) if isinstance(data, dict) else [],
+                            "raw_top_keys": attempt_record["json_keys"],
                             "items_key_present": any(key in data for key in ("items", "equipment", "gear")),
                             "items_type": (
                                 "dict"
@@ -469,17 +498,27 @@ class PoeNinjaAPI:
                     logger.warning("⚠️ API response contained no items, retrying with next overview")
                     continue
 
-                attempt_record["error"] = f"HTTP {response.status_code}"
-                if response.status_code != 404:
+                if response.status_code in (404, 422):
+                    result["overview_attempts"].append(attempt_record)
+                    continue
+
+                attempt_record["error"] = attempt_record["error"] or f"HTTP {response.status_code}"
+                if response.status_code not in (404, 422):
                     logger.warning(f"⚠️ API returned {response.status_code} for overview {overview_value}")
                 result["overview_attempts"].append(attempt_record)
 
             message = "API requests completed without usable items."
             result["exception"] = message
+            result["failure_diagnostics"] = {"attempts": result["overview_attempts"]}
             if allow_html_fallback:
                 result["fallback_used"] = True
-                result["source"] = "html_fallback"
-                result["data"] = await self._scrape_character_page(account, character, league, warning=message)
+                result["source"] = "html_diagnostics"
+                result["html_diagnostics"] = await self._scrape_character_page(
+                    normalized_account,
+                    normalized_character,
+                    league,
+                    warning=message,
+                )
             return result
 
         except Exception as e:
@@ -488,8 +527,13 @@ class PoeNinjaAPI:
             if allow_html_fallback:
                 logger.info("   Falling back to HTML scraping")
                 result["fallback_used"] = True
-                result["source"] = "html_fallback"
-                result["data"] = await self._scrape_character_page(account, character, league, warning=str(e))
+                result["source"] = "html_diagnostics"
+                result["html_diagnostics"] = await self._scrape_character_page(
+                    normalized_account,
+                    normalized_character,
+                    league,
+                    warning=str(e),
+                )
             return result
 
     def _normalize_api_character_data(self, api_data: Dict[str, Any]) -> Dict[str, Any]:

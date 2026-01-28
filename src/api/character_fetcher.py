@@ -1,10 +1,8 @@
 """
 Character Data Fetcher
-Fetches character data from multiple sources with intelligent fallback:
-1. poe.ninja API (primary)
-2. poe.ninja web scraping (fallback)
-3. Official PoE ladder API (fallback)
-4. Direct web scraping (last resort)
+    Fetches character data from multiple sources with intelligent fallback:
+    1. poe.ninja API (primary)
+    2. Official PoE ladder API (fallback)
 """
 
 import logging
@@ -96,9 +94,7 @@ class CharacterFetcher:
 
         Priority order:
         1. poe.ninja API (new enhanced client)
-        2. poe.ninja web scraping (SSE/model API)
-        3. Official ladder API
-        4. Direct HTML scraping
+        2. Official ladder API
 
         Args:
             account_name: PoE account name
@@ -122,17 +118,6 @@ class CharacterFetcher:
             self.last_error_message = f"poe.ninja API error: {str(e)}"
             logger.warning(f"⚠️ {self.last_error_message}")
 
-        # Fallback to poe.ninja SSE/model API
-        try:
-            char_data = await self.get_character_from_poe_ninja(account_name, character_name, league)
-            if char_data and char_data.get("level", 0) > 0:
-                logger.info("Successfully fetched from poe.ninja SSE API")
-                self.last_error_message = ""  # Clear error on success
-                return char_data
-        except Exception as e:
-            self.last_error_message = f"poe.ninja SSE API error: {str(e)}"
-            logger.warning(self.last_error_message)
-
         # Fallback to ladder API
         try:
             char_data = await self.get_character_from_ladder(character_name, league)
@@ -142,17 +127,6 @@ class CharacterFetcher:
                 return char_data
         except Exception as e:
             self.last_error_message = f"Ladder API error: {str(e)}"
-            logger.warning(self.last_error_message)
-
-        # Last resort: direct HTML scraping
-        try:
-            char_data = await self._scrape_character_direct(account_name, character_name)
-            if char_data:
-                logger.info("Successfully fetched via direct scraping")
-                self.last_error_message = ""  # Clear error on success
-                return char_data
-        except Exception as e:
-            self.last_error_message = f"Direct scraping error: {str(e)}"
             logger.warning(self.last_error_message)
 
         # All methods exhausted
