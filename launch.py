@@ -7,6 +7,7 @@ Handles setup and launches the MCP server
 import os
 import sys
 import io
+import argparse
 import asyncio
 import subprocess
 from pathlib import Path
@@ -15,6 +16,15 @@ from pathlib import Path
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+STDIO_MODE = False
+HUMAN_OUTPUT = sys.stdout
+
+
+def human_print(*args, **kwargs):
+    """Print human-facing output to the configured stream."""
+    stream = kwargs.pop('file', HUMAN_OUTPUT)
+    print(*args, file=stream, **kwargs)
 
 # ANSI color codes for pretty output
 class Colors:
@@ -31,29 +41,29 @@ class Colors:
 
 def print_header(text):
     """Print colored header"""
-    print(f"\n{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{text.center(60)}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}\n")
+    human_print(f"\n{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+    human_print(f"{Colors.HEADER}{Colors.BOLD}{text.center(60)}{Colors.ENDC}")
+    human_print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}\n")
 
 
 def print_success(text):
     """Print success message"""
-    print(f"{Colors.OKGREEN}✓ {text}{Colors.ENDC}")
+    human_print(f"{Colors.OKGREEN}✓ {text}{Colors.ENDC}")
 
 
 def print_info(text):
     """Print info message"""
-    print(f"{Colors.OKCYAN}ℹ {text}{Colors.ENDC}")
+    human_print(f"{Colors.OKCYAN}ℹ {text}{Colors.ENDC}")
 
 
 def print_warning(text):
     """Print warning message"""
-    print(f"{Colors.WARNING}⚠ {text}{Colors.ENDC}")
+    human_print(f"{Colors.WARNING}⚠ {text}{Colors.ENDC}")
 
 
 def print_error(text):
     """Print error message"""
-    print(f"{Colors.FAIL}✗ {text}{Colors.ENDC}")
+    human_print(f"{Colors.FAIL}✗ {text}{Colors.ENDC}")
 
 
 def check_python_version():
@@ -154,42 +164,42 @@ async def initialize_database():
 def show_welcome():
     """Show welcome message"""
     print_header("PoE2 Build Optimizer")
-    print(f"{Colors.OKBLUE}")
-    print("  An AI-powered Path of Exile 2 build optimization server")
-    print("  Built with MCP (Model Context Protocol)")
-    print(f"{Colors.ENDC}")
+    human_print(f"{Colors.OKBLUE}")
+    human_print("  An AI-powered Path of Exile 2 build optimization server")
+    human_print("  Built with MCP (Model Context Protocol)")
+    human_print(f"{Colors.ENDC}")
     print_info("This launcher will set up and start the MCP server")
-    print()
+    human_print()
 
 
 def show_usage_instructions():
     """Show usage instructions"""
     print_header("Usage Instructions")
 
-    print(f"{Colors.OKGREEN}{Colors.BOLD}Option 1: Use with Claude Desktop{Colors.ENDC}")
-    print("Add this to your Claude Desktop MCP configuration:")
-    print(f"{Colors.OKCYAN}")
+    human_print(f"{Colors.OKGREEN}{Colors.BOLD}Option 1: Use with Claude Desktop{Colors.ENDC}")
+    human_print("Add this to your Claude Desktop MCP configuration:")
+    human_print(f"{Colors.OKCYAN}")
     config_path = Path.cwd() / "src" / "mcp_server.py"
-    print('{')
-    print('  "mcpServers": {')
-    print('    "poe2-optimizer": {')
-    print('      "command": "python",')
-    print(f'      "args": ["{config_path}"]')
-    print('    }')
-    print('  }')
-    print('}')
-    print(f"{Colors.ENDC}")
+    human_print('{')
+    human_print('  "mcpServers": {')
+    human_print('    "poe2-optimizer": {')
+    human_print('      "command": "python",')
+    human_print(f'      "args": ["{config_path}"]')
+    human_print('    }')
+    human_print('  }')
+    human_print('}')
+    human_print(f"{Colors.ENDC}")
 
-    print(f"\n{Colors.OKGREEN}{Colors.BOLD}Option 2: Run Standalone{Colors.ENDC}")
-    print("The server is now running. Use the MCP protocol to interact with it.")
+    human_print(f"\n{Colors.OKGREEN}{Colors.BOLD}Option 2: Run Standalone{Colors.ENDC}")
+    human_print("The server is now running. Use the MCP protocol to interact with it.")
 
-    print(f"\n{Colors.OKGREEN}{Colors.BOLD}Example Queries (in Claude Desktop):{Colors.ENDC}")
-    print("  • Analyze my PoE2 character: AccountName/CharacterName")
-    print("  • How can I increase my DPS?")
-    print("  • What gear should I upgrade next?")
-    print("  • Optimize my passive tree for survivability")
+    human_print(f"\n{Colors.OKGREEN}{Colors.BOLD}Example Queries (in Claude Desktop):{Colors.ENDC}")
+    human_print("  • Analyze my PoE2 character: AccountName/CharacterName")
+    human_print("  • How can I increase my DPS?")
+    human_print("  • What gear should I upgrade next?")
+    human_print("  • Optimize my passive tree for survivability")
 
-    print(f"\n{Colors.WARNING}Press Ctrl+C to stop the server{Colors.ENDC}\n")
+    human_print(f"\n{Colors.WARNING}Press Ctrl+C to stop the server{Colors.ENDC}\n")
 
 
 async def start_mcp_server():
@@ -237,11 +247,29 @@ async def main():
     await start_mcp_server()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Launch the PoE2 MCP server")
+    parser.add_argument(
+        "--stdio",
+        action="store_true",
+        help="Send human-facing output to stderr to keep stdout JSON-only",
+    )
+    return parser.parse_args()
+
+
+def configure_output(stdio_mode: bool):
+    global STDIO_MODE, HUMAN_OUTPUT
+    STDIO_MODE = stdio_mode
+    HUMAN_OUTPUT = sys.stderr if STDIO_MODE else sys.stdout
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    configure_output(args.stdio or os.getenv("MCP_STDIO") == "1")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n{Colors.OKGREEN}Goodbye!{Colors.ENDC}")
+        human_print(f"\n{Colors.OKGREEN}Goodbye!{Colors.ENDC}")
     except Exception as e:
         print_error(f"Fatal error: {e}")
         import traceback
