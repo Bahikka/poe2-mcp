@@ -20,6 +20,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+class PoeNinjaFetchError(RuntimeError):
+    """Structured error for poe.ninja fetch failures."""
+
+    def __init__(self, message: str, trace: Dict[str, Any]):
+        super().__init__(message)
+        self.trace = trace
+
 # PoE2 Ascendancy to Base Class mapping
 # Maps ascendancy class names to their base class
 ASCENDANCY_TO_BASE_CLASS = {
@@ -335,13 +343,19 @@ class PoeNinjaAPI:
         league: str = "Abyss",
         overview: Optional[str] = None,
         allow_html_fallback: bool = False,
+        raise_on_failure: bool = False,
     ) -> Dict[str, Any]:
         """
         Fetch character using the discovered hidden API with verbose diagnostics.
         """
-        resolved_account = account
+        resolved_account = self._poe_ninja_account_for_path(account)
         resolved_character = character
-        self._validate_resolved_identity(account, resolved_account, "account")
+        self._validate_resolved_identity(
+            account,
+            resolved_account,
+            "account",
+            allow_hash_swap=True,
+        )
         self._validate_resolved_identity(character, resolved_character, "character")
 
         result: Dict[str, Any] = {
@@ -357,6 +371,8 @@ class PoeNinjaAPI:
             "items_key_present": False,
             "items_type": "none",
             "items_len": None,
+            "passives_len": None,
+            "skills_len": None,
             "fallback_used": False,
             "source": "poe_ninja_json",
             "exception": None,
@@ -367,8 +383,8 @@ class PoeNinjaAPI:
 
         try:
             # Step 1: Get index state to find the snapshot version for this league
-            index_state = await self._get_index_state()
-            if not index_state:
+            overview_list = await self.list_overviews()
+            if not overview_list:
                 message = "Could not get index state from poe.ninja."
                 logger.warning(f"⚠️ {message}")
                 result["exception"] = message
@@ -383,10 +399,9 @@ class PoeNinjaAPI:
                     )
                 return result
 
-            snapshot_versions = index_state.get("snapshotVersions", [])
             overview_to_version = {
                 snapshot.get("url"): snapshot.get("version")
-                for snapshot in snapshot_versions
+                for snapshot in overview_list
                 if snapshot.get("url") and snapshot.get("version")
             }
 
@@ -452,6 +467,8 @@ class PoeNinjaAPI:
                     "http_status": response.status_code,
                     "content_type": content_type,
                     "items_len": None,
+                    "passives_len": None,
+                    "skills_len": None,
                     "is_json": False,
                     "json_keys": [],
                     "error": None,
@@ -468,8 +485,12 @@ class PoeNinjaAPI:
                         result["exception"] = attempt_record["error"]
 
                 if response.status_code == 200 and data is not None:
-                    items = self._extract_items(data)
+                    items = self._extract_items(data) if isinstance(data, dict) else []
+                    passives = self._select_active_passives(data) if isinstance(data, dict) else []
+                    skills = data.get("skills", []) if isinstance(data, dict) else []
                     attempt_record["items_len"] = len(items)
+                    attempt_record["passives_len"] = len(passives)
+                    attempt_record["skills_len"] = len(skills)
                     result["overview_attempts"].append(attempt_record)
 
                     result.update(
@@ -489,29 +510,36 @@ class PoeNinjaAPI:
                                 else "none"
                             ),
                             "items_len": len(items),
+                            "passives_len": len(passives),
+                            "skills_len": len(skills),
                             "data": data,
                         }
                     )
 
-                    if items:
-                        logger.info("✅ Successfully fetched character from API with items")
+                    if items and passives:
+                        logger.info("✅ Successfully fetched character from API with items and passives")
                         return result
 
-                    logger.warning("⚠️ API response contained no items, retrying with next overview")
+                    logger.warning("⚠️ API response missing items or passives, retrying with next overview")
                     continue
 
                 if response.status_code in (404, 422):
                     result["overview_attempts"].append(attempt_record)
                     continue
 
-                attempt_record["error"] = attempt_record["error"] or f"HTTP {response.status_code}"
+                if response.status_code == 200 and data is None:
+                    attempt_record["error"] = attempt_record["error"] or "No JSON body returned"
+                else:
+                    attempt_record["error"] = attempt_record["error"] or f"HTTP {response.status_code}"
                 if response.status_code not in (404, 422):
                     logger.warning(f"⚠️ API returned {response.status_code} for overview {overview_value}")
                 result["overview_attempts"].append(attempt_record)
 
-            message = "API requests completed without usable items."
+            message = "API requests completed without usable items or passives."
             result["exception"] = message
             result["failure_diagnostics"] = {"attempts": result["overview_attempts"]}
+            if raise_on_failure:
+                raise PoeNinjaFetchError(message, trace=result)
             if allow_html_fallback:
                 result["fallback_used"] = True
                 result["source"] = "html_diagnostics"

@@ -31,5 +31,21 @@
         ]
       }
     }
-  }
+  },
+  "skills": [
+    {
+      "name": "Arc"
+    }
+  ],
+  "passiveSelection": [
+    12345,
+    23456,
+    34567
+  ],
+  "passiveSelectionSet1": [
+    12345,
+    23456
+  ],
+  "passiveSelectionSet2": [],
+  "useSecondWeaponSet": false
 }

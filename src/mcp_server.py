@@ -4166,18 +4166,26 @@ Could not extract account and character from URL.
                 league=league,
                 overview=overview,
                 allow_html_fallback=False,
+                raise_on_failure=True,
             )
             result.pop("data", None)
-        except Exception:
-            result = {
-                "resolved_account": account,
-                "resolved_character": character,
-                "league": league,
-                "overview": overview,
-                "exception": traceback.format_exc(),
-                "fallback_used": False,
-                "source": "poe_ninja_json",
-            }
+        except Exception as exc:
+            from src.api.poe_ninja_api import PoeNinjaFetchError
+
+            if isinstance(exc, PoeNinjaFetchError):
+                result = exc.trace
+                result.pop("data", None)
+                result["exception"] = str(exc)
+            else:
+                result = {
+                    "resolved_account": account,
+                    "resolved_character": character,
+                    "league": league,
+                    "overview": overview,
+                    "exception": traceback.format_exc(),
+                    "fallback_used": False,
+                    "source": "poe_ninja_json",
+                }
 
         return [types.TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
