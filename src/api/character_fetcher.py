@@ -8,6 +8,7 @@ Character Data Fetcher
 import logging
 import re
 from typing import Optional, Dict, Any, List
+from urllib.parse import quote
 import httpx
 from bs4 import BeautifulSoup
 
@@ -82,6 +83,16 @@ class CharacterFetcher:
 
         # Return as-is if no mapping found (works for Standard, Hardcore, etc.)
         return league
+
+    @staticmethod
+    def _poe_ninja_account_for_path(account_name: str) -> str:
+        """Format poe.ninja account segment (only # -> - when needed)."""
+        return account_name.replace("#", "-")
+
+    @staticmethod
+    def _encode_path_segment(value: str) -> str:
+        """Percent-encode a URL path segment without sanitizing unicode."""
+        return quote(value, safe="", encoding="utf-8")
 
     async def get_character(
         self,
@@ -234,7 +245,12 @@ class CharacterFetcher:
 
         try:
             # URL format: https://poe.ninja/poe2/profile/{account}/character/{character}
-            url = f"{settings.POE_NINJA_PROFILE_URL}/poe2/profile/{account_name}/character/{character_name}"
+            account_segment = self._encode_path_segment(self._poe_ninja_account_for_path(account_name))
+            character_segment = self._encode_path_segment(character_name)
+            url = (
+                f"{settings.POE_NINJA_PROFILE_URL}/poe2/profile/{account_segment}"
+                f"/character/{character_segment}"
+            )
             logger.info(f"Fetching character from poe.ninja: {url}")
 
             response = await self.client.get(url)
@@ -342,7 +358,12 @@ class CharacterFetcher:
         try:
             # The events API returns Server-Sent Events (SSE) with model ID
             # Format: data: {"version":4211492750}
-            events_url = f"{settings.POE_NINJA_PROFILE_URL}/poe2/api/events/character/{account_name}/{character_name}"
+            account_segment = self._encode_path_segment(self._poe_ninja_account_for_path(account_name))
+            character_segment = self._encode_path_segment(character_name)
+            events_url = (
+                f"{settings.POE_NINJA_PROFILE_URL}/poe2/api/events/character/"
+                f"{account_segment}/{character_segment}"
+            )
 
             logger.info(f"Fetching character model ID from: {events_url}")
             await self.rate_limiter.acquire()
@@ -376,7 +397,10 @@ class CharacterFetcher:
                     return None
 
             # Now fetch the character model using the ID
-            model_url = f"{settings.POE_NINJA_PROFILE_URL}/poe2/api/profile/characters/{account_name}/{character_name}/model/{model_id}"
+            model_url = (
+                f"{settings.POE_NINJA_PROFILE_URL}/poe2/api/profile/characters/"
+                f"{account_segment}/{character_segment}/model/{model_id}"
+            )
 
             logger.info(f"Fetching character model from: {model_url}")
             await self.rate_limiter.acquire()

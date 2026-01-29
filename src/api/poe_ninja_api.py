@@ -6,8 +6,7 @@ Fetches character data, build rankings, and economy data from poe.ninja
 import httpx
 import json
 import logging
-import unicodedata
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any
 from urllib.parse import quote
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -244,33 +243,44 @@ class PoeNinjaAPI:
             logger.error(f"❌ Failed to fetch index state: {e}")
             return None
 
-    def _build_character_request_url(
-        self,
-        base_url: str,
-        params: Dict[str, Any],
-        preencoded_keys: Optional[Set[str]] = None,
-    ) -> str:
-        """Build a URL with encoded params (unicode-safe, no double encoding)."""
-        preencoded_keys = preencoded_keys or set()
+    def _build_character_request_url(self, base_url: str, params: Dict[str, Any]) -> str:
+        """Build a URL with encoded params (unicode-safe)."""
         encoded_pairs = []
         for key, value in params.items():
             key_enc = quote(str(key), safe="", encoding="utf-8")
             value_str = str(value)
-            if key in preencoded_keys:
-                encoded_pairs.append(f"{key_enc}={value_str}")
-            else:
-                encoded_pairs.append(f"{key_enc}={quote(value_str, safe='', encoding='utf-8')}")
+            encoded_pairs.append(f"{key_enc}={quote(value_str, safe='', encoding='utf-8')}")
         return f"{base_url}?{'&'.join(encoded_pairs)}"
 
     @staticmethod
-    def _normalize_identity(value: str) -> str:
-        """Normalize unicode values for account/character names."""
-        return unicodedata.normalize("NFKC", value)
+    def _validate_resolved_identity(
+        input_value: str,
+        resolved_value: str,
+        label: str,
+        allow_hash_swap: bool = False,
+    ) -> None:
+        """Ensure resolved identity matches the input (optionally allowing # -> -)."""
+        if resolved_value == input_value:
+            return
+        if allow_hash_swap and resolved_value == input_value.replace("#", "-"):
+            return
+        logger.error(
+            "❌ Resolved %s does not match input. input=%r resolved=%r",
+            label,
+            input_value,
+            resolved_value,
+        )
+        raise ValueError(f"Resolved {label} does not match input.")
 
     @staticmethod
-    def _is_preencoded(value: str) -> bool:
-        """Detect already percent-encoded unicode strings to avoid double encoding."""
-        return "%F0%9F" in value or "%f0%9f" in value
+    def _poe_ninja_account_for_path(account: str) -> str:
+        """Format poe.ninja account segment (only # -> - when needed)."""
+        return account.replace("#", "-")
+
+    @staticmethod
+    def _encode_path_segment(value: str) -> str:
+        """Percent-encode a URL path segment without sanitizing unicode."""
+        return quote(value, safe="", encoding="utf-8")
 
     def _extract_items(self, api_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extract items from multiple possible keys and normalize wrapper formats."""
@@ -329,12 +339,14 @@ class PoeNinjaAPI:
         """
         Fetch character using the discovered hidden API with verbose diagnostics.
         """
-        normalized_account = self._normalize_identity(account)
-        normalized_character = self._normalize_identity(character)
+        resolved_account = account
+        resolved_character = character
+        self._validate_resolved_identity(account, resolved_account, "account")
+        self._validate_resolved_identity(character, resolved_character, "character")
 
         result: Dict[str, Any] = {
-            "resolved_account": normalized_account,
-            "resolved_character": normalized_character,
+            "resolved_account": resolved_account,
+            "resolved_character": resolved_character,
             "league": league,
             "overview": overview,
             "build_version": None,
@@ -364,8 +376,8 @@ class PoeNinjaAPI:
                     result["fallback_used"] = True
                     result["source"] = "html_diagnostics"
                     result["html_diagnostics"] = await self._scrape_character_page(
-                        normalized_account,
-                        normalized_character,
+                        resolved_account,
+                        resolved_character,
                         league,
                         warning=message,
                     )
@@ -423,24 +435,14 @@ class PoeNinjaAPI:
 
                 url = f"{self.base_url}/poe2/api/builds/{version}/character"
                 params = {
-                    "account": normalized_account,
-                    "name": normalized_character,
+                    "account": resolved_account,
+                    "name": resolved_character,
                     "overview": overview_value,
                 }
-
-                preencoded_keys = set()
-                if self._is_preencoded(normalized_account):
-                    preencoded_keys.add("account")
-                if self._is_preencoded(normalized_character):
-                    preencoded_keys.add("name")
-
-                request_url = self._build_character_request_url(url, params, preencoded_keys)
+                request_url = self._build_character_request_url(url, params)
                 logger.debug(f"Calling API: {request_url}")
 
-                if preencoded_keys:
-                    response = await self.client.get(request_url)
-                else:
-                    response = await self.client.get(url, params=params)
+                response = await self.client.get(request_url)
 
                 content_type = response.headers.get("content-type", "")
                 attempt_record = {
@@ -514,8 +516,8 @@ class PoeNinjaAPI:
                 result["fallback_used"] = True
                 result["source"] = "html_diagnostics"
                 result["html_diagnostics"] = await self._scrape_character_page(
-                    normalized_account,
-                    normalized_character,
+                    resolved_account,
+                    resolved_character,
                     league,
                     warning=message,
                 )
@@ -529,8 +531,8 @@ class PoeNinjaAPI:
                 result["fallback_used"] = True
                 result["source"] = "html_diagnostics"
                 result["html_diagnostics"] = await self._scrape_character_page(
-                    normalized_account,
-                    normalized_character,
+                    resolved_account,
+                    resolved_character,
                     league,
                     warning=str(e),
                 )
@@ -820,12 +822,14 @@ class PoeNinjaAPI:
         try:
             # Convert league to URL slug (e.g., "Abyss" -> "abyss")
             league_slug = self._get_league_slug(league)
+            account_segment = self._encode_path_segment(self._poe_ninja_account_for_path(account))
+            character_segment = self._encode_path_segment(character)
 
             # CRITICAL FIX: Based on HAR file analysis, the correct URL format includes league
             # Format: https://poe.ninja/poe2/builds/{league}/character/{account}/{character}
             urls = [
-                f"{self.base_url}/poe2/builds/{league_slug}/character/{account}/{character}",
-                f"{self.base_url}/builds/{league_slug}/character/{account}/{character}",  # Fallback without poe2
+                f"{self.base_url}/poe2/builds/{league_slug}/character/{account_segment}/{character_segment}",
+                f"{self.base_url}/builds/{league_slug}/character/{account_segment}/{character_segment}",  # Fallback without poe2
             ]
 
             logger.info(f"📡 Attempting to fetch from poe.ninja with league '{league}' (slug: '{league_slug}')")
@@ -1394,8 +1398,10 @@ class PoeNinjaAPI:
             logger.debug(f"Parameters: {params}")
 
             # Add referer header to appear as if coming from character page
+            account_segment = self._encode_path_segment(self._poe_ninja_account_for_path(account))
+            character_segment = self._encode_path_segment(character)
             headers = {
-                "Referer": f"{self.base_url}/poe2/builds/character/{account}/{character}",
+                "Referer": f"{self.base_url}/poe2/builds/character/{account_segment}/{character_segment}",
                 "Accept": "application/json",
             }
 

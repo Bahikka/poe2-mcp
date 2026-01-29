@@ -4,6 +4,7 @@ import os
 import json
 import sys
 from pathlib import Path
+import pytest
 
 os.environ.setdefault("SECRET_KEY", "test")
 os.environ.setdefault("ENCRYPTION_KEY", "test")
@@ -44,3 +45,13 @@ def test_bahikka_items_nonempty_from_fixture():
     items = api._extract_items(raw_data)
 
     assert items
+
+
+def test_resolved_account_guard_rejects_changes():
+    api = PoeNinjaAPI()
+    account = "🅱🄰🅷🅸🅺🅺🄰-1456"
+
+    with pytest.raises(ValueError):
+        api._validate_resolved_identity(account, "BAHIKKA-1456", "account")
+
+    api._validate_resolved_identity("Account#1234", "Account-1234", "account", allow_hash_swap=True)
